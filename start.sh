@@ -101,9 +101,11 @@ else
 fi
 
 # Check if any of the ports are already in use
-SEAWEEDFS_S3_PORT="${SEAWEEDFS_S3_PORT:-$(sed -n 's/^SEAWEEDFS_S3_PORT=//p' .env | head -n 1)}"
-SEAWEEDFS_S3_PORT="${SEAWEEDFS_S3_PORT:-8333}"
-ports=(3000 5000 "$SEAWEEDFS_S3_PORT" 5432)
+MINIO_API_PORT="${MINIO_API_PORT:-$(sed -n 's/^MINIO_API_PORT=//p' .env | head -n 1)}"
+MINIO_API_PORT="${MINIO_API_PORT:-9000}"
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-$(sed -n 's/^MINIO_CONSOLE_PORT=//p' .env | head -n 1)}"
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+ports=(3000 5000 "$MINIO_API_PORT" "$MINIO_CONSOLE_PORT" 5432)
 for port in "${ports[@]}"; do
     if lsof -i:"$port" > /dev/null 2>&1; then
         echo -e "${YELLOW}⚠ Warning: Port $port is already in use. This may cause conflicts.${NC}"
@@ -123,8 +125,8 @@ echo "This may take a minute or two depending on your system..."
 check_service "Database" "worklenz_db" ""
 DB_STATUS=$?
 
-check_service "SeaweedFS" "worklenz_seaweedfs" ""
-SEAWEEDFS_STATUS=$?
+check_service "MinIO" "worklenz_minio" "http://localhost:${MINIO_API_PORT}/minio/health/live"
+MINIO_STATUS=$?
 
 check_service "Backend" "worklenz_backend" "http://localhost:3000/public/health"
 BACKEND_STATUS=$?
@@ -136,10 +138,11 @@ FRONTEND_STATUS=$?
 echo -e "\n${BLUE}Service URLs:${NC}"
 [ $FRONTEND_STATUS -eq 0 ] && echo "  • Frontend: http://localhost:5000 (or https://localhost:5000 if SSL is enabled)"
 [ $BACKEND_STATUS -eq 0 ] && echo "  • Backend API: http://localhost:3000 (or https://localhost:3000 if SSL is enabled)"
-[ $SEAWEEDFS_STATUS -eq 0 ] && echo "  • SeaweedFS S3 API: http://localhost:${SEAWEEDFS_S3_PORT}"
+[ $MINIO_STATUS -eq 0 ] && echo "  • MinIO S3 API: http://localhost:${MINIO_API_PORT}"
+[ $MINIO_STATUS -eq 0 ] && echo "  • MinIO Console: http://localhost:${MINIO_CONSOLE_PORT}"
 
 # Check if all services are up
-if [ $DB_STATUS -eq 0 ] && [ $SEAWEEDFS_STATUS -eq 0 ] && [ $BACKEND_STATUS -eq 0 ] && [ $FRONTEND_STATUS -eq 0 ]; then
+if [ $DB_STATUS -eq 0 ] && [ $MINIO_STATUS -eq 0 ] && [ $BACKEND_STATUS -eq 0 ] && [ $FRONTEND_STATUS -eq 0 ]; then
     echo -e "\n${GREEN}✅ All Worklenz services are running successfully!${NC}"
 else
     echo -e "\n${YELLOW}⚠ Some services may not be running properly. Check the logs for more details:${NC}"

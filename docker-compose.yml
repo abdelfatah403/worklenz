@@ -20,9 +20,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      seaweedfs:
+      minio:
         condition: service_healthy
-      configure-seaweedfs:
+      minio-init:
         condition: service_completed_successfully
     restart: unless-stopped
     env_file:
@@ -30,8 +30,9 @@ services:
     environment:
       DB_HOST: db
       DB_PORT: 5432
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
-      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localhost:${SEAWEEDFS_S3_PORT:-8333}/${S3_BUCKET:-worklenz-bucket}}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localhost:${MINIO_API_PORT:-9000}/${S3_BUCKET:-worklenz-bucket}}
+      S3_REGION: ${S3_REGION:-us-east-1}
       # Allows the current published image to start when Google OAuth is not configured.
       # Replace these defaults with real credentials in .env to enable Google sign-in.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-disabled}
@@ -52,22 +53,35 @@ services:
     networks:
       - worklenz
 
-  seaweedfs:
-    image: chrislusf/seaweedfs:4.41
-    container_name: worklenz_seaweedfs
-
+  # MinIO community images were removed from Docker Hub (and Quay requires
+  # auth now), so this uses the maintained Chainguard build of the same server.
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: worklenz_minio
+    command: server /data --console-address ":9001"
     ports:
-      - "${SEAWEEDFS_S3_PORT:-8333}:8333"
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     restart: unless-stopped
     environment:
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-worklenz}}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY or AWS_SECRET_ACCESS_KEY}}
-      S3_BUCKET: ${S3_BUCKET:-${AWS_BUCKET:-worklenz-bucket}}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-minioadmin}}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-minioadmin}}
+      # The browser uploads directly to MinIO with presigned PUT URLs, so the
+      # API must accept cross-origin requests from the Worklenz frontend.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
+      MC_CONFIG_DIR: /tmp/.mc
     volumes:
-      - worklenz_seaweedfs_data:/data
-    command: ["mini", "-dir=/data"]
+      - worklenz_minio_data:/data
+    depends_on:
+      minio-permissions:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9333/cluster/status"]
+      # The Chainguard image runs as non-root and ships `mc` (not curl/wget).
+      test:
+        [
+          "CMD-SHELL",
+          "mc alias set local http://127.0.0.1:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" >/dev/null 2>&1 && mc ready local",
+        ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -75,24 +89,39 @@ services:
     networks:
       - worklenz
 
-  configure-seaweedfs:
-    image: amazon/aws-cli:2.27.49
-    container_name: worklenz_configure_seaweedfs
+  # The Chainguard image runs as uid 65532, so a fresh root-owned named volume
+  # must be handed over before MinIO can write to it.
+  minio-permissions:
+    image: busybox:1.37
+    container_name: worklenz_minio_permissions
+    command: ["sh", "-c", "chown -R 65532:65532 /data"]
+    volumes:
+      - worklenz_minio_data:/data
+    restart: "no"
+    networks:
+      - worklenz
+
+  minio-init:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: worklenz_minio_init
     depends_on:
-      seaweedfs:
+      minio:
         condition: service_healthy
     restart: on-failure
     environment:
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-worklenz}}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY or AWS_SECRET_ACCESS_KEY}}
-      AWS_DEFAULT_REGION: ${S3_REGION:-${AWS_REGION:-us-east-1}}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-minioadmin}}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-minioadmin}}
       S3_BUCKET: ${S3_BUCKET:-${AWS_BUCKET:-worklenz-bucket}}
+      MC_CONFIG_DIR: /tmp/.mc
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        if ! aws --endpoint-url http://seaweedfs:8333 s3api create-bucket --bucket "$${S3_BUCKET}"; then
-          aws --endpoint-url http://seaweedfs:8333 s3api head-bucket --bucket "$${S3_BUCKET}"
-        fi
+        set -e
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${S3_BUCKET}"
+        # Attachments are linked with S3_PUBLIC_URL, so the bucket must allow
+        # anonymous downloads. Uploads still require credentials.
+        mc anonymous set download "local/$${S3_BUCKET}"
     networks:
       - worklenz
 
@@ -188,6 +217,10 @@ services:
 
 volumes:
   worklenz_postgres_data:
+  worklenz_minio_data:
+    name: worklenz_minio_data
+  # Retained so data from the previous SeaweedFS backend is not removed by
+  # `docker compose down -v`. It is no longer mounted by any service.
   worklenz_seaweedfs_data:
     name: worklenz_seaweedfs_data
   pgdata:
